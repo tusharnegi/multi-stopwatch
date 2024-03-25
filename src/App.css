@@ -1,38 +1,88 @@
-.App {
-  text-align: center;
+.app {  
+  display: flex;  
+  flex-direction: column;  
+  align-items: center;  
+  font-family: Arial, sans-serif;  
+  background: #f5f5f5;  
+  padding: 1em;  
+}  
+  
+.grid {  
+  display: grid;  
+  grid-template-columns: repeat(3, 1fr);  
+  grid-template-rows: repeat(3, 1fr);  
+  gap: 1em;  
+  margin-bottom: 1em;  
+  width: 100%;  
+  max-width: 800px;  
+}  
+  
+.stopwatch {  
+  display: flex;  
+  flex-direction: column;  
+  align-items: center;  
+  justify-content: center;  
+  border: 1px solid #ccc;  
+  padding: 1em;  
+  border-radius: 10px;  
+  background: #fff;  
+  box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.1);  
+}  
+  
+.time {  
+  font-size: 2em;  
+  margin-bottom: 1em;  
+}  
+  
+.toggle, .reset, .remove, .addStopwatch, .clearAll {  
+  margin: 0.5em;  
+  padding: 0.5em 1em;  
+  border: none;  
+  border-radius: 5px;  
+  background: #007bff;  
+  color: #fff;  
+  cursor: pointer;  
+  transition: background 0.3s;  
+}  
+
+.addStopwatch {  
+  background: #28a745;  
+}
+  
+.clearAll {  
+  background: #dc3545;  
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
+.addStopwatch:hover {  
+  background: #218838;  
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
+.clearAll:hover {  
+  background: #c82333;  
 }
 
-.App-header {
-  background-color: #282c34;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
-}
-
-.App-link {
-  color: #61dafb;
-}
-
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
+.toggle:hover, .reset:hover, .remove:hover {  
+  background: #0056b3;  
+}  
+  
+input {  
+  margin-top: 1em;  
+  padding: 0.5em;  
+  border: 1px solid #ccc;  
+  border-radius: 5px;  
+  width: 100%;  
+}  
+  
+button {  
+  padding: 0.5em 1em;  
+  border: none;  
+  border-radius: 5px;  
+  background: #28a745;  
+  color: #fff;  
+  cursor: pointer;  
+  transition: background 0.3s;  
+}  
+  
+button:hover {  
+  background: #218838;  
+}  
