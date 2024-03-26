@@ -5,6 +5,7 @@ function Stopwatch({ title, setTitle, remove }) {
   const [time, setTime] = useState(0);
   const [isActive, setIsActive] = useState(false);
   const [startTime, setStartTime] = useState(0);
+  const [elapsedPausedTime, setElapsedPausedTime] = useState(0);
 
   function toggle() {
     if (!isActive) {
@@ -14,11 +15,6 @@ function Stopwatch({ title, setTitle, remove }) {
     }
   }
 
-  function reset() {
-    setTime(0);
-    setIsActive(false);
-  }
-  
   useEffect(() => {
     let interval = null;
     if (isActive) {
@@ -34,12 +30,19 @@ function Stopwatch({ title, setTitle, remove }) {
 
   const startTimer = () => {
     setIsActive(true);
-    setStartTime(Date.now() - time);
+    setStartTime(Date.now() - elapsedPausedTime);
   };
 
   const stopTimer = () => {
+    setElapsedPausedTime(new Date().getTime() - startTime); 
     setIsActive(false);
   };
+
+  function reset() {
+    setTime(0);
+    setElapsedPausedTime(0);
+    setIsActive(false);
+  }
 
   // Calculate hours, minutes and seconds  
   // pad the minutes and seconds with leading zeros if needed
