@@ -97,6 +97,7 @@ function App() {
 
   return (
     <div className="app">
+      <h2 className="app">Multi-Stopwatch v1</h2>
       <button className="addStopwatch" onClick={addStopwatch}>Add Stopwatch</button>
       <button className="clearAll" onClick={clearAll}>Clear</button>
 

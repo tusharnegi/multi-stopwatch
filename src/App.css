@@ -45,6 +45,10 @@
   transition: background 0.3s;  
 }  
 
+.heading {  
+  background: #28a745;  
+}
+
 .addStopwatch {  
   background: #28a745;  
 }
