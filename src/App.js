@@ -7,6 +7,10 @@ function Stopwatch({ title, setTitle, remove }) {
   const [startTime, setStartTime] = useState(0);
   const [elapsedPausedTime, setElapsedPausedTime] = useState(0);
 
+  useEffect(() => {
+    document.title = `${hours} : ${minutes} : ${seconds}`; // Quick solution
+  }, [time]);
+
   function toggle() {
     if (!isActive) {
       startTimer();
