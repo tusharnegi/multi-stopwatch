@@ -82,13 +82,30 @@ function App() {
     }
   });
 
+  const [counter, setCounter] = useState(() => {
+    // Try to load the state from localStorage  
+    const savedState = localStorage.getItem("stopwatchesCounter");
+    if (savedState) {
+      return Number(JSON.parse(savedState));
+    } else {
+      // This is a default state if nothing is in localStorage  
+      return 0;
+    }
+  });
+
   useEffect(() => {
     // Save the state to localStorage whenever it changes  
     localStorage.setItem("stopwatches", JSON.stringify(stopwatches));
   }, [stopwatches]);
 
+  useEffect(() => {
+    // Save the state to localStorage whenever it changes  
+    localStorage.setItem("stopwatchesCounter", JSON.stringify(counter));
+  }, [counter]);
+
   const addStopwatch = () => {
-    const id = stopwatches.length + 1;
+    setCounter(counter + 1);
+    const id = counter;
     setStopwatches([...stopwatches, { title: `Stopwatch ${id}`, id }]);
   };
 
@@ -101,7 +118,7 @@ function App() {
 
   return (
     <div className="app">
-      <h2 className="app">Multi-Stopwatch v1</h2>
+      <h2 className="app">Multi-Stopwatch v1.1</h2>
       <button className="addStopwatch" onClick={addStopwatch}>Add Stopwatch</button>
       <button className="clearAll" onClick={clearAll}>Clear</button>
 
