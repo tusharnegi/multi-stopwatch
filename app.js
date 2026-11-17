@@ -1,0 +1,360 @@
+(() => {
+  'use strict';
+
+  const KEY = 'ms.v2';
+  const SEEN = 'ms.seen';
+  const AWAY_MS = 15 * 60e3;        // a gap this long with a timer running prompts "were you away?"
+  const KEEP_MS = 60 * 864e5;       // history kept for 60 days
+  const HUES = [285, 200, 150, 60, 350, 110, 240, 25];
+  const $ = (id) => document.getElementById(id);
+
+  // A timer is { id, name, hue, sessions: [[startMs, endMs | null], ...] }.
+  // Elapsed time is always derived from timestamps, so timers keep running while the page is closed.
+  let state = load();
+  let lastTick = Date.now();
+  let lastSeenWrite = 0;
+  let away = null;
+  let undo = null;
+  let iconKey = '';
+  const lists = new Set([$('list')]);   // the main list plus the floating window's list
+
+  // ---------- state ----------
+  function load() {
+    try {
+      const s = JSON.parse(localStorage.getItem(KEY));
+      if (s && Array.isArray(s.timers)) return s;
+    } catch {}
+    const s = { timers: [], solo: true, last: null };
+    try {   // carry over custom names from the original app
+      const old = JSON.parse(localStorage.getItem('stopwatches'));
+      if (Array.isArray(old)) {
+        for (const o of old) {
+          if (o && typeof o.title === 'string' && o.title.trim() && !/^Stopwatch \d+$/.test(o.title)) {
+            s.timers.push(make(o.title.trim(), s.timers));
+          }
+        }
+      }
+    } catch {}
+    return s;
+  }
+
+  function save() {
+    const cutoff = Date.now() - KEEP_MS;
+    for (const t of state.timers) t.sessions = t.sessions.filter(([, e]) => e == null || e > cutoff);
+    localStorage.setItem(KEY, JSON.stringify(state));
+  }
+
+  function make(name, existing) {
+    const used = new Set(existing.map((t) => t.hue));
+    const hue = HUES.find((h) => !used.has(h)) ?? HUES[existing.length % HUES.length];
+    return { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, hue, sessions: [] };
+  }
+
+  const byId = (id) => state.timers.find((t) => t.id === id);
+  const byName = (name) => state.timers.find((t) => t.name.toLowerCase() === name.toLowerCase());
+  const running = (t) => { const l = t.sessions[t.sessions.length - 1]; return l && l[1] == null ? l : null; };
+  const span = (t, a, b, now) => t.sessions.reduce((n, [s, e]) => n + Math.max(0, Math.min(e ?? now, b) - Math.max(s, a)), 0);
+  const dayStart = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+
+  // ---------- actions ----------
+  function stop(t, at = Date.now()) {
+    const r = running(t);
+    if (!r) return;
+    r[1] = at;
+    if (r[1] - r[0] < 1000) t.sessions.pop();
+  }
+  function start(t) {
+    if (running(t)) return;
+    if (state.solo) for (const x of state.timers) if (x !== t) stop(x);
+    t.sessions.push([Date.now(), null]);
+    state.last = t.id;
+  }
+  function toggle(t) {
+    if (!t) return;
+    running(t) ? stop(t) : start(t);
+    commit();
+  }
+  function begin(name) {   // start by name, creating the timer if needed
+    name = name.trim().slice(0, 60);
+    if (!name) return;
+    let t = byName(name);
+    if (!t) { t = make(name, state.timers); state.timers.push(t); }
+    start(t);
+    commit(true);
+  }
+  function stopAll() { state.timers.forEach((t) => stop(t)); commit(); }
+  function commit(structural) {
+    save();
+    if (structural) build();
+    paint();
+  }
+
+  // ---------- formatting ----------
+  const pad = (n) => String(n).padStart(2, '0');
+  function clock(ms) {
+    const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60;
+    return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+  }
+  function words(ms) {
+    const m = Math.round(ms / 60e3);
+    return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+  }
+  const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const hhmm = (t) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+  // ---------- rendering ----------
+  function build() {
+    const html = state.timers.map((t, i) => `
+      <li class="card" data-id="${t.id}" style="--h:${t.hue}">
+        <button class="play" type="button" tabindex="0">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5v14l11-7z"/><path class="i-pause" d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+        </button>
+        <span class="who"><span class="name">${esc(t.name)}</span><span class="sub"></span></span>
+        <span class="time"></span>
+        <span class="acts">
+          <button type="button" data-act="edit" aria-label="Rename ${esc(t.name)}">✎</button>
+          <button type="button" data-act="del" aria-label="Delete ${esc(t.name)}">✕</button>
+          ${i < 9 ? `<kbd class="key">${i + 1}</kbd>` : ''}
+        </span>
+      </li>`).join('');
+    for (const el of lists) {
+      el.innerHTML = html || (el === $('list') ? '' : '<li class="empty">No timers yet</li>');
+    }
+  }
+
+  function paint() {
+    const now = Date.now(), today = dayStart(now);
+    let total = 0;
+    const live = [];
+    const per = new Map();
+    for (const t of state.timers) {
+      const ms = span(t, today, Infinity, now), r = running(t);
+      per.set(t.id, { ms, r });
+      total += ms;
+      if (r) live.push(t);
+    }
+
+    for (const el of lists) {
+      for (const card of el.querySelectorAll('.card')) {
+        const t = byId(card.dataset.id), p = per.get(card.dataset.id);
+        if (!p) continue;
+        card.classList.toggle('on', !!p.r);
+        card.querySelector('.time').textContent = clock(p.ms);
+        card.querySelector('.sub').textContent = p.r ? `running ${clock(now - p.r[0])}` : '';
+        card.querySelector('.play').setAttribute('aria-label', `${p.r ? 'Pause' : 'Start'} ${t.name}`);
+      }
+    }
+
+    $('total').textContent = clock(total);
+    $('date').textContent = new Date(now).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+    document.title = live.length
+      ? `${clock(per.get(live[0].id).ms)} · ${live[0].name}${live.length > 1 ? ` +${live.length - 1}` : ''}`
+      : 'Stopwatch';
+
+    paintTimeline(now, today);
+    paintWeek(now, today);
+    paintIcon(live);
+  }
+
+  function paintTimeline(now, today) {
+    let first = now;
+    for (const t of state.timers) for (const [s, e] of t.sessions) if ((e ?? now) > today) first = Math.min(first, Math.max(s, today));
+    const from = Math.min(first, now - 36e5), range = now - from;
+    let html = '';
+    for (const t of state.timers) {
+      for (const [s, e] of t.sessions) {
+        const a = Math.max(s, from), b = Math.min(e ?? now, now);
+        if (b > a) html += `<i class="seg" style="--h:${t.hue};left:${((a - from) / range) * 100}%;width:${((b - a) / range) * 100}%"></i>`;
+      }
+    }
+    $('timeline').innerHTML = html;
+    $('from').textContent = hhmm(from);
+  }
+
+  function paintWeek(now, today) {
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today); d.setDate(d.getDate() - i);
+      const a = d.getTime(), e = new Date(a); e.setDate(e.getDate() + 1);
+      const parts = state.timers.map((t) => ({ hue: t.hue, ms: span(t, a, e.getTime(), now) })).filter((p) => p.ms > 0);
+      days.push({ a, parts, ms: parts.reduce((n, p) => n + p.ms, 0) });
+    }
+    const max = Math.max(...days.map((d) => d.ms), 1);
+    $('week').innerHTML = days.map((d) => `
+      <div class="day${d.a === today ? ' now' : ''}" title="${new Date(d.a).toLocaleDateString([], { weekday: 'long' })}: ${words(d.ms)}">
+        <div class="col"><div class="stack" style="height:${(d.ms / max) * 100}%">
+          ${d.parts.map((p) => `<i class="seg" style="--h:${p.hue};flex:${p.ms}"></i>`).join('')}
+        </div></div>
+        ${new Date(d.a).toLocaleDateString([], { weekday: 'narrow' })}
+      </div>`).join('');
+  }
+
+  function paintIcon(live) {   // the tab icon and dock badge show at a glance whether anything is running
+    const key = live.map((t) => t.hue).join();
+    if (key === iconKey) return;
+    iconKey = key;
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d');
+    const color = live.length ? `oklch(0.8 0.14 ${live[0].hue})` : '#6b7080';
+    g.fillStyle = '#0c0d10';
+    g.beginPath(); g.roundRect(0, 0, 64, 64, 14); g.fill();
+    g.strokeStyle = color; g.lineWidth = 7; g.lineCap = 'round';
+    g.beginPath(); g.arc(32, 32, 19, -Math.PI / 2, live.length ? Math.PI * 1.1 : Math.PI * 1.5); g.stroke();
+    if (live.length) { g.fillStyle = color; g.beginPath(); g.arc(32, 32, 7, 0, Math.PI * 2); g.fill(); }
+    $('favicon').href = c.toDataURL();
+    if (navigator.setAppBadge) (live.length ? navigator.setAppBadge(live.length) : navigator.clearAppBadge()).catch(() => {});
+  }
+
+  // ---------- list interactions (shared by the page and the floating window) ----------
+  function wire(el) {
+    el.addEventListener('click', (ev) => {
+      if (ev.target.closest('input')) return;
+      const card = ev.target.closest('.card');
+      if (!card) return;
+      const t = byId(card.dataset.id), act = ev.target.closest('[data-act]')?.dataset.act;
+      if (act === 'edit') rename(card, t);
+      else if (act === 'del') remove(t);
+      else toggle(t);
+    });
+  }
+
+  function rename(card, t) {
+    const label = card.querySelector('.name');
+    const input = document.createElement('input');
+    input.className = 'name'; input.value = t.name; input.maxLength = 60;
+    label.replaceWith(input);
+    input.focus(); input.select();
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      const v = input.value.trim();
+      if (keep && v) t.name = v;
+      commit(true);
+    };
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') finish(true);
+      if (ev.key === 'Escape') finish(false);
+    });
+  }
+
+  function remove(t) {
+    const index = state.timers.indexOf(t);
+    stop(t);
+    state.timers.splice(index, 1);
+    commit(true);
+    clearTimeout(undo?.timer);
+    undo = { t, index, timer: setTimeout(() => { $('toast').hidden = true; undo = null; }, 6000) };
+    $('toastText').textContent = `Deleted “${t.name}”`;
+    $('toast').hidden = false;
+  }
+  $('undo').addEventListener('click', () => {
+    if (!undo) return;
+    clearTimeout(undo.timer);
+    state.timers.splice(undo.index, 0, undo.t);
+    undo = null;
+    $('toast').hidden = true;
+    commit(true);
+  });
+
+  // ---------- away detection ----------
+  // If nothing ticked for a while (laptop asleep, app closed) while a timer ran, ask instead of guessing.
+  function checkAway(from, to) {
+    if (!from || to - from < AWAY_MS) return;
+    const hit = state.timers.filter((t) => { const r = running(t); return r && r[0] < from; });
+    if (!hit.length) return;
+    away = { from: away ? Math.min(away.from, from) : from, to };
+    $('awayText').textContent = `${hit.map((t) => t.name).join(', ')} kept running while this was closed or asleep (${words(away.to - away.from)}, since ${hhmm(away.from)}).`;
+    $('away').hidden = false;
+  }
+  $('awayKeep').addEventListener('click', () => { away = null; $('away').hidden = true; });
+  $('awayDrop').addEventListener('click', () => {
+    for (const t of state.timers) {
+      const r = running(t);
+      if (r && r[0] < away.from) { r[1] = away.from; t.sessions.push([away.to, null]); }
+    }
+    away = null;
+    $('away').hidden = true;
+    commit();
+  });
+
+  function tick() {
+    const now = Date.now();
+    checkAway(lastTick, now);
+    lastTick = now;
+    if (now - lastSeenWrite > 15e3) { lastSeenWrite = now; localStorage.setItem(SEEN, now); }
+    paint();
+  }
+
+  // ---------- floating always-on-top window ----------
+  async function popOut() {
+    if (!('documentPictureInPicture' in window)) return;
+    if (documentPictureInPicture.window) return documentPictureInPicture.window.close();
+    const w = await documentPictureInPicture.requestWindow({ width: 280, height: Math.min(60 + state.timers.length * 44, 360) });
+    const css = w.document.createElement('link');
+    css.rel = 'stylesheet'; css.href = new URL('style.css', location.href).href;
+    w.document.head.append(css);
+    w.document.body.className = 'pip';
+    const ul = w.document.createElement('ul');
+    ul.className = 'list';
+    w.document.body.append(ul);
+    lists.add(ul); wire(ul); build(); paint();
+    w.addEventListener('pagehide', () => lists.delete(ul));
+  }
+
+  // ---------- wiring ----------
+  wire($('list'));
+
+  $('add').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    begin($('q').value);
+    $('q').value = '';
+    $('q').blur();
+  });
+
+  $('solo').checked = state.solo;
+  $('solo').addEventListener('change', (ev) => { state.solo = ev.target.checked; commit(); });
+
+  if ('documentPictureInPicture' in window) {
+    $('pop').hidden = false;
+    $('pop').addEventListener('click', popOut);
+  }
+
+  let installEvent = null;
+  window.addEventListener('beforeinstallprompt', (ev) => { ev.preventDefault(); installEvent = ev; $('install').hidden = false; });
+  $('install').addEventListener('click', () => { installEvent?.prompt(); $('install').hidden = true; });
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.target.matches('input')) { if (ev.key === 'Escape') ev.target.blur(); return; }
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    if (ev.key === '/' || ev.key === 'n') { ev.preventDefault(); $('q').focus(); }
+    else if (ev.key >= '1' && ev.key <= '9') toggle(state.timers[ev.key - 1]);
+    else if (ev.key === ' ' && !ev.target.matches('button')) { ev.preventDefault(); toggle(byId(state.last) || state.timers[0]); }
+    else if (ev.key === 'p') popOut();
+  });
+
+  // another tab or the installed app changed something
+  window.addEventListener('storage', (ev) => {
+    if (ev.key !== KEY) return;
+    state = load();
+    $('solo').checked = state.solo;
+    build(); paint();
+  });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+
+  // Links that act: ?start=Name, ?toggle=Name, ?stop — for launchers, Shortcuts and bookmarks.
+  const q = new URLSearchParams(location.search);
+  checkAway(Number(localStorage.getItem(SEEN)), Date.now());
+  if (q.has('start')) begin(q.get('start'));
+  else if (q.has('toggle')) { const t = byName(q.get('toggle').trim()); t ? toggle(t) : begin(q.get('toggle')); }
+  else if (q.has('stop')) stopAll();
+  if (location.search) history.replaceState(null, '', location.pathname);
+
+  build();
+  tick();
+  setInterval(tick, 1000);
+
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
