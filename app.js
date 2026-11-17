@@ -248,6 +248,7 @@
     clearTimeout(undo?.timer);
     undo = { t, index, timer: setTimeout(() => { $('toast').hidden = true; undo = null; }, 6000) };
     $('toastText').textContent = `Deleted “${t.name}”`;
+    $('undo').hidden = false;
     $('toast').hidden = false;
   }
   $('undo').addEventListener('click', () => {
@@ -292,7 +293,18 @@
   async function popOut() {
     if (!('documentPictureInPicture' in window)) return;
     if (documentPictureInPicture.window) return documentPictureInPicture.window.close();
-    const w = await documentPictureInPicture.requestWindow({ width: 280, height: Math.min(60 + state.timers.length * 44, 360) });
+    let w;
+    try {
+      w = await documentPictureInPicture.requestWindow({ width: 280, height: Math.min(60 + state.timers.length * 44, 360) });
+    } catch {
+      clearTimeout(undo?.timer);
+      undo = null;
+      $('undo').hidden = true;
+      $('toastText').textContent = 'This browser blocked the floating window. Try Chrome or Edge.';
+      $('toast').hidden = false;
+      setTimeout(() => { $('toast').hidden = true; $('undo').hidden = false; }, 5000);
+      return;
+    }
     const css = w.document.createElement('link');
     css.rel = 'stylesheet'; css.href = new URL('style.css', location.href).href;
     w.document.head.append(css);

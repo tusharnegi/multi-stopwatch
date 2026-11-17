@@ -1,5 +1,5 @@
 // Network first, so a deploy shows up on the next load; the cache only serves when offline.
-const CACHE = 'ms-v2';
+const CACHE = 'ms-v3';
 const SHELL = ['./', 'style.css', 'app.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', (e) => {
@@ -18,7 +18,7 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' })   // revalidate, so a deploy isn't hidden behind the HTTP cache
       .then((res) => {
         if (res.ok && !url.search) {
           const copy = res.clone();
