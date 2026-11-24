@@ -16,6 +16,7 @@
   let lastSeenWrite = 0;
   let away = null;
   let undo = null;
+  let toastTimer = 0;
   let iconKey = '';
   let selDay = null;                // day-start ms of the day picked in the week chart (not persisted)
   let weekKey = '', dayHtml = '';
@@ -66,31 +67,43 @@
     r[1] = at;
     if (r[1] - r[0] < 1000) t.sessions.pop();
   }
+  // Solo mode: take the window [a, b) away from every other timer so time is never double counted.
+  function clipOthers(t, a, b) {
+    if (!state.solo || b <= a) return;
+    for (const x of state.timers) {
+      if (x === t) continue;
+      x.sessions = x.sessions.flatMap(([s, e]) => {
+        if ((e ?? Infinity) <= a || s >= b) return [[s, e]];
+        return [...(s < a ? [[s, a]] : []), ...((e ?? Infinity) > b ? [[b, e]] : [])].filter(([p, q]) => q == null || q - p >= 1000);
+      });
+    }
+  }
   function start(t, at = Date.now()) {   // `at` in the past backdates the start (forgotten timer)
-    const r = running(t), prev = t.sessions[t.sessions.length - (r ? 2 : 1)];
+    const now = Date.now(), r = running(t), prev = t.sessions[t.sessions.length - (r ? 2 : 1)];
     at = Math.max(at, prev?.[1] ?? 0);    // never overlap this timer's previous session
     if (r) { if (at >= r[0]) return; r[0] = at; }
     else t.sessions.push([at, null]);
-    if (state.solo) for (const x of state.timers) { const xr = x !== t && running(x); if (xr) stop(x, Math.max(xr[0], at)); }
+    if (state.solo) {
+      for (const x of state.timers) if (x !== t) stop(x, now);
+      clipOthers(t, at, now);
+    }
     state.last = t.id;
   }
   // Remove (d < 0) or add (d > 0) up to |d| ms of today's time on t; returns whether anything changed.
   function adjust(t, d, now = Date.now()) {
-    const mid = dayStart(now), s = t.sessions, r = running(t);
+    const mid = dayStart(now), s = t.sessions;
     if (d > 0) {
-      if (r) {
-        const prev = s[s.length - 2], ns = Math.max(mid, prev?.[1] ?? 0, r[0] - d);
-        if (ns >= r[0]) return false;
-        r[0] = ns;
+      const last = s[s.length - 1];
+      if (last && (last[1] ?? now) > mid) {   // grow the latest session backwards
+        const prev = s[s.length - 2], ns = Math.max(mid, prev?.[1] ?? 0, last[0] - d);
+        if (last[0] - ns < 1000) return false;
+        clipOthers(t, ns, last[0]);
+        last[0] = ns;
         return true;
       }
-      const last = s[s.length - 1];
-      if (last && last[1] > mid) {
-        const e = Math.min(last[1] + d, now);
-        if (e - last[1] >= 1000) { last[1] = e; return true; }
-      }
-      const a = Math.max(mid, now - d, last?.[1] ?? 0);
+      const a = Math.max(mid, now - d);
       if (now - a < 1000) return false;
+      clipOthers(t, a, now);
       s.push([a, now]);
       return true;
     }
@@ -117,12 +130,12 @@
     running(t) ? stop(t) : start(t);
     commit();
   }
-  // "Write report 1h 30m" -> name plus how long ago it really started (0 = no duration; capped at 12h)
+  // "Write report 1h 30m" -> name plus how long ago it really started (0 minutes = just strip it; capped at 12h)
   function parseDur(text) {
     text = text.trim();
     const m = /^(.*?\S)\s+(?:(\d+)\s*h(?:\s*(\d+)\s*m)?|(\d+)\s*m)$/i.exec(text);
     const min = m ? (m[4] != null ? +m[4] : m[2] * 60 + +(m[3] || 0)) : 0;
-    return min ? { name: m[1], ms: Math.min(min, 720) * 60e3 } : { name: text, ms: 0 };
+    return m ? { name: m[1], ms: Math.min(min, 720) * 60e3 } : { name: text, ms: 0 };
   }
   function begin(text) {   // start by name, creating the timer if needed
     const { name: raw, ms } = parseDur(text), name = raw.slice(0, 60).trim();
@@ -290,13 +303,22 @@
     if (/^[=+\-@\t\r]/.test(v)) v = `'${v}`;   // stop spreadsheets treating a name as a formula
     return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
   };
-  function csvOf(timers, now) {   // one row per session, oldest first; null when there is nothing to export
-    const rows = timers.flatMap((t) => t.sessions.map(([s, e]) => [t.name, s, e ?? now]));
+  function csvOf(timers, now) {   // one row per session per day, oldest first; null when there is nothing to export
+    const rows = [];
+    for (const t of timers) for (const [s, e] of t.sessions) {
+      for (let a = s, end = e ?? now; a < end || a === s;) {   // split at local midnight so a row never ends before it starts
+        const n = new Date(a); n.setHours(24, 0, 0, 0);
+        const b = Math.min(end, n.getTime());
+        rows.push([t.name, a, b, b === n.getTime()]);
+        a = b;
+        if (a >= end) break;
+      }
+    }
     if (!rows.length) return null;
     const day = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
-    const time = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-    return ['timer,date,start,end,minutes', ...rows.sort((a, b) => a[1] - b[1]).map(([n, s, e]) =>
-      [n, day(s), time(s), time(e), ((e - s) / 60e3).toFixed(1)].map(csvCell).join(','))].join('\r\n') + '\r\n';
+    const time = (ms, eod) => { const d = new Date(ms); return eod ? '24:00' : `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+    return ['timer,date,start,end,minutes', ...rows.sort((a, b) => a[1] - b[1]).map(([n, s, e, eod]) =>
+      [n, day(s), time(s), time(e, eod), ((e - s) / 60e3).toFixed(1)].map(csvCell).join(','))].join('\r\n') + '\r\n';
   }
   function exportCsv() {
     const now = Date.now(), csv = csvOf(state.timers, now);
@@ -305,7 +327,7 @@
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     a.download = `stopwatch-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.csv`;
     document.body.append(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   }
 
   // ---------- list interactions (shared by the page and the floating window) ----------
@@ -344,28 +366,25 @@
     });
   }
 
+  function toast(text, canUndo, ms) {   // one shared toast timer, so an earlier toast can't hide a later one
+    clearTimeout(toastTimer);
+    $('toastText').textContent = text;
+    $('undo').hidden = !canUndo;
+    $('toast').hidden = false;
+    toastTimer = setTimeout(() => { $('toast').hidden = true; undo = null; }, ms);
+  }
   function remove(t) {
     const index = state.timers.indexOf(t);
     stop(t);
     state.timers.splice(index, 1);
     commit(true);
-    clearTimeout(undo?.timer);
-    undo = { t, index, timer: setTimeout(() => { $('toast').hidden = true; undo = null; }, 6000) };
-    $('toastText').textContent = `Deleted “${t.name}”`;
-    $('undo').hidden = false;
-    $('toast').hidden = false;
+    undo = { t, index };
+    toast(`Deleted “${t.name}”`, true, 6000);
   }
-  function note(text) {   // a toast without the undo button
-    clearTimeout(undo?.timer);
-    undo = null;
-    $('undo').hidden = true;
-    $('toastText').textContent = text;
-    $('toast').hidden = false;
-    setTimeout(() => { $('toast').hidden = true; $('undo').hidden = false; }, 5000);
-  }
+  function note(text) { undo = null; toast(text, false, 5000); }   // a toast without the undo button
   $('undo').addEventListener('click', () => {
     if (!undo) return;
-    clearTimeout(undo.timer);
+    clearTimeout(toastTimer);
     state.timers.splice(undo.index, 0, undo.t);
     undo = null;
     $('toast').hidden = true;
@@ -433,12 +452,16 @@
     $('q').blur();
   });
 
-  $('export').addEventListener('click', exportCsv);
+  $('export').addEventListener('click', (ev) => {
+    exportCsv();
+    if (ev.detail) ev.currentTarget.blur();   // after a mouse click, let Space pause/resume again
+  });
   $('week').addEventListener('click', (ev) => {
     const b = ev.target.closest('.day');
     if (!b) return;
     selDay = selDay === Number(b.dataset.day) ? null : Number(b.dataset.day);
     paint();
+    if (ev.detail) b.blur();
   });
 
   $('solo').checked = state.solo;
