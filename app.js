@@ -3,6 +3,7 @@
 
   const KEY = 'ms.v2';
   const SEEN = 'ms.seen';
+  const STEP = 5 * 60e3;            // size of the +/- adjust buttons
   const AWAY_MS = 15 * 60e3;        // a gap this long with a timer running prompts "were you away?"
   const KEEP_MS = 60 * 864e5;       // history kept for 60 days
   const HUES = [285, 200, 150, 60, 350, 110, 240, 25];
@@ -15,7 +16,10 @@
   let lastSeenWrite = 0;
   let away = null;
   let undo = null;
+  let toastTimer = 0;
   let iconKey = '';
+  let selDay = null;                // day-start ms of the day picked in the week chart (not persisted)
+  let weekKey = '', dayHtml = '';
   const lists = new Set([$('list')]);   // the main list plus the floating window's list
 
   // ---------- state ----------
@@ -63,23 +67,82 @@
     r[1] = at;
     if (r[1] - r[0] < 1000) t.sessions.pop();
   }
-  function start(t) {
-    if (running(t)) return;
-    if (state.solo) for (const x of state.timers) if (x !== t) stop(x);
-    t.sessions.push([Date.now(), null]);
+  // Solo mode: take the window [a, b) away from every other timer so time is never double counted.
+  function clipOthers(t, a, b) {
+    if (!state.solo || b <= a) return;
+    for (const x of state.timers) {
+      if (x === t) continue;
+      x.sessions = x.sessions.flatMap(([s, e]) => {
+        if ((e ?? Infinity) <= a || s >= b) return [[s, e]];
+        return [...(s < a ? [[s, a]] : []), ...((e ?? Infinity) > b ? [[b, e]] : [])].filter(([p, q]) => q == null || q - p >= 1000);
+      });
+    }
+  }
+  function start(t, at = Date.now()) {   // `at` in the past backdates the start (forgotten timer)
+    const now = Date.now(), r = running(t), prev = t.sessions[t.sessions.length - (r ? 2 : 1)];
+    at = Math.max(at, prev?.[1] ?? 0);    // never overlap this timer's previous session
+    if (r) { if (at >= r[0]) return; r[0] = at; }
+    else t.sessions.push([at, null]);
+    if (state.solo) {
+      for (const x of state.timers) if (x !== t) stop(x, now);
+      clipOthers(t, at, now);
+    }
     state.last = t.id;
+  }
+  // Remove (d < 0) or add (d > 0) up to |d| ms of today's time on t; returns whether anything changed.
+  function adjust(t, d, now = Date.now()) {
+    const mid = dayStart(now), s = t.sessions;
+    if (d > 0) {
+      const last = s[s.length - 1];
+      if (last && (last[1] ?? now) > mid) {   // grow the latest session backwards
+        const prev = s[s.length - 2], ns = Math.max(mid, prev?.[1] ?? 0, last[0] - d);
+        if (last[0] - ns < 1000) return false;
+        clipOthers(t, ns, last[0]);
+        last[0] = ns;
+        return true;
+      }
+      const a = Math.max(mid, now - d);
+      if (now - a < 1000) return false;
+      clipOthers(t, a, now);
+      s.push([a, now]);
+      return true;
+    }
+    let left = -d, changed = false;
+    for (let i = s.length - 1; i >= 0 && left > 0; i--) {
+      const [a, e] = s[i], end = e ?? now, lo = Math.max(a, mid), take = Math.min(end - lo, left);
+      if (take <= 0) continue;
+      left -= take; changed = true;
+      if (e == null) {   // open session: move its start later (a session spanning midnight is split there)
+        if (a < mid) s.splice(i, 1, [a, mid], [mid + take, null]); else s[i][0] = a + take;
+      } else if (a >= mid && e - take - a < 1000) s.splice(i, 1);
+      else s[i][1] = e - take;
+    }
+    return changed;
+  }
+  function nudge(t, d) {
+    if (!t) return;
+    adjust(t, d);
+    state.last = t.id;
+    commit();
   }
   function toggle(t) {
     if (!t) return;
     running(t) ? stop(t) : start(t);
     commit();
   }
-  function begin(name) {   // start by name, creating the timer if needed
-    name = name.trim().slice(0, 60);
+  // "Write report 1h 30m" -> name plus how long ago it really started (0 minutes = just strip it; capped at 12h)
+  function parseDur(text) {
+    text = text.trim();
+    const m = /^(.*?\S)\s+(?:(\d+)\s*h(?:\s*(\d+)\s*m)?|(\d+)\s*m)$/i.exec(text);
+    const min = m ? (m[4] != null ? +m[4] : m[2] * 60 + +(m[3] || 0)) : 0;
+    return m ? { name: m[1], ms: Math.min(min, 720) * 60e3 } : { name: text, ms: 0 };
+  }
+  function begin(text) {   // start by name, creating the timer if needed
+    const { name: raw, ms } = parseDur(text), name = raw.slice(0, 60).trim();
     if (!name) return;
     let t = byName(name);
     if (!t) { t = make(name, state.timers); state.timers.push(t); }
-    start(t);
+    start(t, Date.now() - ms);
     commit(true);
   }
   function stopAll() { state.timers.forEach((t) => stop(t)); commit(); }
@@ -112,6 +175,8 @@
         <span class="who"><span class="name">${esc(t.name)}</span><span class="sub"></span></span>
         <span class="time"></span>
         <span class="acts">
+          <button type="button" data-act="minus" aria-label="Remove 5 minutes from ${esc(t.name)}">−5</button>
+          <button type="button" data-act="plus" aria-label="Add 5 minutes to ${esc(t.name)}">+5</button>
           <button type="button" data-act="edit" aria-label="Rename ${esc(t.name)}">✎</button>
           <button type="button" data-act="del" aria-label="Delete ${esc(t.name)}">✕</button>
           ${i < 9 ? `<kbd class="key">${i + 1}</kbd>` : ''}
@@ -179,14 +244,40 @@
       const parts = state.timers.map((t) => ({ hue: t.hue, ms: span(t, a, e.getTime(), now) })).filter((p) => p.ms > 0);
       days.push({ a, parts, ms: parts.reduce((n, p) => n + p.ms, 0) });
     }
-    const max = Math.max(...days.map((d) => d.ms), 1);
-    $('week').innerHTML = days.map((d) => `
-      <div class="day${d.a === today ? ' now' : ''}" title="${new Date(d.a).toLocaleDateString([], { weekday: 'long' })}: ${words(d.ms)}">
-        <div class="col"><div class="stack" style="height:${(d.ms / max) * 100}%">
-          ${d.parts.map((p) => `<i class="seg" style="--h:${p.hue};flex:${p.ms}"></i>`).join('')}
-        </div></div>
-        ${new Date(d.a).toLocaleDateString([], { weekday: 'narrow' })}
-      </div>`).join('');
+    const max = Math.max(...days.map((d) => d.ms), 1), wk = $('week');
+    if (!days.some((d) => d.a === selDay)) selDay = null;
+    const key = days.map((d) => d.a).join();
+    if (key !== weekKey) {   // only rebuild the buttons when the days change, so keyboard focus survives the ticks
+      weekKey = key;
+      wk.innerHTML = days.map((d) => `
+        <button type="button" class="day${d.a === today ? ' now' : ''}" data-day="${d.a}">
+          <span class="col"><span class="stack"></span></span>${new Date(d.a).toLocaleDateString([], { weekday: 'narrow' })}
+        </button>`).join('');
+    }
+    days.forEach((d, i) => {
+      const b = wk.children[i], name = new Date(d.a).toLocaleDateString([], { weekday: 'long' }), stack = b.querySelector('.stack');
+      b.classList.toggle('sel', d.a === selDay);
+      b.setAttribute('aria-pressed', d.a === selDay);
+      b.title = `${name}: ${words(d.ms)}`;
+      b.setAttribute('aria-label', `${name}, ${words(d.ms)}`);
+      stack.style.height = `${(d.ms / max) * 100}%`;
+      stack.innerHTML = d.parts.map((p) => `<i class="seg" style="--h:${p.hue};flex:${p.ms}"></i>`).join('');
+    });
+    paintDay(now);
+  }
+
+  function paintDay(now) {   // breakdown of the day picked in the week chart
+    const el = $('dayview');
+    el.hidden = selDay == null;
+    if (selDay == null) { dayHtml = ''; return; }
+    const e = new Date(selDay); e.setDate(e.getDate() + 1);
+    const rows = state.timers.map((t) => ({ t, ms: span(t, selDay, e.getTime(), now) })).filter((r) => r.ms > 0).sort((a, b) => b.ms - a.ms);
+    const total = rows.reduce((n, r) => n + r.ms, 0), d = new Date(selDay), top = rows[0]?.ms || 1;
+    const html = rows.length
+      ? `<h2>${d.toLocaleDateString([], { weekday: 'long' })} ${d.getDate()} ${d.toLocaleDateString([], { month: 'short' })} · ${words(total)} total</h2><ul>${rows.map((r) => `
+          <li style="--h:${r.t.hue}"><i class="dot"></i><span class="n">${esc(r.t.name)}</span><span class="d">${words(r.ms)}</span><span class="bar"><i style="width:${(r.ms / top) * 100}%"></i></span></li>`).join('')}</ul>`
+      : `<h2>Nothing tracked on ${d.toLocaleDateString([], { weekday: 'long' })}</h2>`;
+    if (html !== dayHtml) el.innerHTML = dayHtml = html;
   }
 
   function paintIcon(live) {   // the tab icon and dock badge show at a glance whether anything is running
@@ -206,6 +297,39 @@
     if (navigator.setAppBadge) (live.length ? navigator.setAppBadge(live.length) : navigator.clearAppBadge()).catch(() => {});
   }
 
+  // ---------- CSV export ----------
+  const csvCell = (v) => {
+    v = String(v);
+    if (/^[=+\-@\t\r]/.test(v)) v = `'${v}`;   // stop spreadsheets treating a name as a formula
+    return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  };
+  function csvOf(timers, now) {   // one row per session per day, oldest first; null when there is nothing to export
+    const rows = [];
+    for (const t of timers) for (const [s, e] of t.sessions) {
+      for (let a = s, end = e ?? now; a < end || a === s;) {   // split at local midnight so a row never ends before it starts
+        const n = new Date(a); n.setHours(24, 0, 0, 0);
+        const b = Math.min(end, n.getTime());
+        rows.push([t.name, a, b, b === n.getTime()]);
+        a = b;
+        if (a >= end) break;
+      }
+    }
+    if (!rows.length) return null;
+    const day = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+    const time = (ms, eod) => { const d = new Date(ms); return eod ? '24:00' : `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+    return ['timer,date,start,end,minutes', ...rows.sort((a, b) => a[1] - b[1]).map(([n, s, e, eod]) =>
+      [n, day(s), time(s), time(e, eod), ((e - s) / 60e3).toFixed(1)].map(csvCell).join(','))].join('\r\n') + '\r\n';
+  }
+  function exportCsv() {
+    const now = Date.now(), csv = csvOf(state.timers, now);
+    if (!csv) return note('Nothing to export yet');
+    const d = new Date(now), a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = `stopwatch-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.csv`;
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+
   // ---------- list interactions (shared by the page and the floating window) ----------
   function wire(el) {
     el.addEventListener('click', (ev) => {
@@ -214,6 +338,8 @@
       if (!card) return;
       const t = byId(card.dataset.id), act = ev.target.closest('[data-act]')?.dataset.act;
       if (act === 'edit') rename(card, t);
+      else if (act === 'minus') nudge(t, -STEP);
+      else if (act === 'plus') nudge(t, STEP);
       else if (act === 'del') remove(t);
       else toggle(t);
     });
@@ -240,20 +366,25 @@
     });
   }
 
+  function toast(text, canUndo, ms) {   // one shared toast timer, so an earlier toast can't hide a later one
+    clearTimeout(toastTimer);
+    $('toastText').textContent = text;
+    $('undo').hidden = !canUndo;
+    $('toast').hidden = false;
+    toastTimer = setTimeout(() => { $('toast').hidden = true; undo = null; }, ms);
+  }
   function remove(t) {
     const index = state.timers.indexOf(t);
     stop(t);
     state.timers.splice(index, 1);
     commit(true);
-    clearTimeout(undo?.timer);
-    undo = { t, index, timer: setTimeout(() => { $('toast').hidden = true; undo = null; }, 6000) };
-    $('toastText').textContent = `Deleted “${t.name}”`;
-    $('undo').hidden = false;
-    $('toast').hidden = false;
+    undo = { t, index };
+    toast(`Deleted “${t.name}”`, true, 6000);
   }
+  function note(text) { undo = null; toast(text, false, 5000); }   // a toast without the undo button
   $('undo').addEventListener('click', () => {
     if (!undo) return;
-    clearTimeout(undo.timer);
+    clearTimeout(toastTimer);
     state.timers.splice(undo.index, 0, undo.t);
     undo = null;
     $('toast').hidden = true;
@@ -297,12 +428,7 @@
     try {
       w = await documentPictureInPicture.requestWindow({ width: 280, height: Math.min(60 + state.timers.length * 44, 360) });
     } catch {
-      clearTimeout(undo?.timer);
-      undo = null;
-      $('undo').hidden = true;
-      $('toastText').textContent = 'This browser blocked the floating window. Try Chrome or Edge.';
-      $('toast').hidden = false;
-      setTimeout(() => { $('toast').hidden = true; $('undo').hidden = false; }, 5000);
+      note('This browser blocked the floating window. Try Chrome or Edge.');
       return;
     }
     const css = w.document.createElement('link');
@@ -326,6 +452,18 @@
     $('q').blur();
   });
 
+  $('export').addEventListener('click', (ev) => {
+    exportCsv();
+    if (ev.detail) ev.currentTarget.blur();   // after a mouse click, let Space pause/resume again
+  });
+  $('week').addEventListener('click', (ev) => {
+    const b = ev.target.closest('.day');
+    if (!b) return;
+    selDay = selDay === Number(b.dataset.day) ? null : Number(b.dataset.day);
+    paint();
+    if (ev.detail) b.blur();
+  });
+
   $('solo').checked = state.solo;
   $('solo').addEventListener('change', (ev) => { state.solo = ev.target.checked; commit(); });
 
@@ -344,7 +482,10 @@
     if (ev.key === '/' || ev.key === 'n') { ev.preventDefault(); $('q').focus(); }
     else if (ev.key >= '1' && ev.key <= '9') toggle(state.timers[ev.key - 1]);
     else if (ev.key === ' ' && !ev.target.matches('button')) { ev.preventDefault(); toggle(byId(state.last) || state.timers[0]); }
+    else if (ev.key === '+' || ev.key === '=') nudge(byId(state.last) || state.timers[0], STEP);
+    else if (ev.key === '-') nudge(byId(state.last) || state.timers[0], -STEP);
     else if (ev.key === 'p') popOut();
+    else if (ev.key === 'Escape' && selDay != null) { selDay = null; paint(); }
   });
 
   // another tab or the installed app changed something

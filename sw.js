@@ -1,5 +1,5 @@
 // Network first, so a deploy shows up on the next load; the cache only serves when offline.
-const CACHE = 'ms-v3';
+const CACHE = 'ms-v4';
 const SHELL = ['./', 'style.css', 'app.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', (e) => {
