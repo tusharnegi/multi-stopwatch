@@ -3,6 +3,7 @@
 
   const KEY = 'ms.v2';
   const SEEN = 'ms.seen';
+  const STEP = 5 * 60e3;            // size of the +/- adjust buttons
   const AWAY_MS = 15 * 60e3;        // a gap this long with a timer running prompts "were you away?"
   const KEEP_MS = 60 * 864e5;       // history kept for 60 days
   const HUES = [285, 200, 150, 60, 350, 110, 240, 25];
@@ -63,23 +64,70 @@
     r[1] = at;
     if (r[1] - r[0] < 1000) t.sessions.pop();
   }
-  function start(t) {
-    if (running(t)) return;
-    if (state.solo) for (const x of state.timers) if (x !== t) stop(x);
-    t.sessions.push([Date.now(), null]);
+  function start(t, at = Date.now()) {   // `at` in the past backdates the start (forgotten timer)
+    const r = running(t), prev = t.sessions[t.sessions.length - (r ? 2 : 1)];
+    at = Math.max(at, prev?.[1] ?? 0);    // never overlap this timer's previous session
+    if (r) { if (at >= r[0]) return; r[0] = at; }
+    else t.sessions.push([at, null]);
+    if (state.solo) for (const x of state.timers) { const xr = x !== t && running(x); if (xr) stop(x, Math.max(xr[0], at)); }
     state.last = t.id;
+  }
+  // Remove (d < 0) or add (d > 0) up to |d| ms of today's time on t; returns whether anything changed.
+  function adjust(t, d, now = Date.now()) {
+    const mid = dayStart(now), s = t.sessions, r = running(t);
+    if (d > 0) {
+      if (r) {
+        const prev = s[s.length - 2], ns = Math.max(mid, prev?.[1] ?? 0, r[0] - d);
+        if (ns >= r[0]) return false;
+        r[0] = ns;
+        return true;
+      }
+      const last = s[s.length - 1];
+      if (last && last[1] > mid) {
+        const e = Math.min(last[1] + d, now);
+        if (e - last[1] >= 1000) { last[1] = e; return true; }
+      }
+      const a = Math.max(mid, now - d, last?.[1] ?? 0);
+      if (now - a < 1000) return false;
+      s.push([a, now]);
+      return true;
+    }
+    let left = -d, changed = false;
+    for (let i = s.length - 1; i >= 0 && left > 0; i--) {
+      const [a, e] = s[i], end = e ?? now, lo = Math.max(a, mid), take = Math.min(end - lo, left);
+      if (take <= 0) continue;
+      left -= take; changed = true;
+      if (e == null) {   // open session: move its start later (a session spanning midnight is split there)
+        if (a < mid) s.splice(i, 1, [a, mid], [mid + take, null]); else s[i][0] = a + take;
+      } else if (a >= mid && e - take - a < 1000) s.splice(i, 1);
+      else s[i][1] = e - take;
+    }
+    return changed;
+  }
+  function nudge(t, d) {
+    if (!t) return;
+    adjust(t, d);
+    state.last = t.id;
+    commit();
   }
   function toggle(t) {
     if (!t) return;
     running(t) ? stop(t) : start(t);
     commit();
   }
-  function begin(name) {   // start by name, creating the timer if needed
-    name = name.trim().slice(0, 60);
+  // "Write report 1h 30m" -> name plus how long ago it really started (0 = no duration; capped at 12h)
+  function parseDur(text) {
+    text = text.trim();
+    const m = /^(.*?\S)\s+(?:(\d+)\s*h(?:\s*(\d+)\s*m)?|(\d+)\s*m)$/i.exec(text);
+    const min = m ? (m[4] != null ? +m[4] : m[2] * 60 + +(m[3] || 0)) : 0;
+    return min ? { name: m[1], ms: Math.min(min, 720) * 60e3 } : { name: text, ms: 0 };
+  }
+  function begin(text) {   // start by name, creating the timer if needed
+    const { name: raw, ms } = parseDur(text), name = raw.slice(0, 60).trim();
     if (!name) return;
     let t = byName(name);
     if (!t) { t = make(name, state.timers); state.timers.push(t); }
-    start(t);
+    start(t, Date.now() - ms);
     commit(true);
   }
   function stopAll() { state.timers.forEach((t) => stop(t)); commit(); }
@@ -112,6 +160,8 @@
         <span class="who"><span class="name">${esc(t.name)}</span><span class="sub"></span></span>
         <span class="time"></span>
         <span class="acts">
+          <button type="button" data-act="minus" aria-label="Remove 5 minutes from ${esc(t.name)}">−5</button>
+          <button type="button" data-act="plus" aria-label="Add 5 minutes to ${esc(t.name)}">+5</button>
           <button type="button" data-act="edit" aria-label="Rename ${esc(t.name)}">✎</button>
           <button type="button" data-act="del" aria-label="Delete ${esc(t.name)}">✕</button>
           ${i < 9 ? `<kbd class="key">${i + 1}</kbd>` : ''}
@@ -214,6 +264,8 @@
       if (!card) return;
       const t = byId(card.dataset.id), act = ev.target.closest('[data-act]')?.dataset.act;
       if (act === 'edit') rename(card, t);
+      else if (act === 'minus') nudge(t, -STEP);
+      else if (act === 'plus') nudge(t, STEP);
       else if (act === 'del') remove(t);
       else toggle(t);
     });
@@ -344,6 +396,8 @@
     if (ev.key === '/' || ev.key === 'n') { ev.preventDefault(); $('q').focus(); }
     else if (ev.key >= '1' && ev.key <= '9') toggle(state.timers[ev.key - 1]);
     else if (ev.key === ' ' && !ev.target.matches('button')) { ev.preventDefault(); toggle(byId(state.last) || state.timers[0]); }
+    else if (ev.key === '+' || ev.key === '=') nudge(byId(state.last) || state.timers[0], STEP);
+    else if (ev.key === '-') nudge(byId(state.last) || state.timers[0], -STEP);
     else if (ev.key === 'p') popOut();
   });
 

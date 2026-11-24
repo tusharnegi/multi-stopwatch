@@ -131,6 +131,7 @@ input.name {
 .card:hover .acts button, .acts button:focus-visible { opacity: 1; }
 .acts button:hover { background: var(--line); color: var(--fg); }
 @media (hover: none) { .acts button { opacity: 1; } }
+.acts [data-act=minus], .acts [data-act=plus] { width: 26px; font-size: 12px; font-weight: 600; }
 .acts .key { margin: 0 0 0 4px; }
 
 .hint { text-align: center; color: var(--mute); font-size: 12px; margin-top: 22px; }
