@@ -17,6 +17,8 @@
   let away = null;
   let undo = null;
   let iconKey = '';
+  let selDay = null;                // day-start ms of the day picked in the week chart (not persisted)
+  let weekKey = '', dayHtml = '';
   const lists = new Set([$('list')]);   // the main list plus the floating window's list
 
   // ---------- state ----------
@@ -229,14 +231,40 @@
       const parts = state.timers.map((t) => ({ hue: t.hue, ms: span(t, a, e.getTime(), now) })).filter((p) => p.ms > 0);
       days.push({ a, parts, ms: parts.reduce((n, p) => n + p.ms, 0) });
     }
-    const max = Math.max(...days.map((d) => d.ms), 1);
-    $('week').innerHTML = days.map((d) => `
-      <div class="day${d.a === today ? ' now' : ''}" title="${new Date(d.a).toLocaleDateString([], { weekday: 'long' })}: ${words(d.ms)}">
-        <div class="col"><div class="stack" style="height:${(d.ms / max) * 100}%">
-          ${d.parts.map((p) => `<i class="seg" style="--h:${p.hue};flex:${p.ms}"></i>`).join('')}
-        </div></div>
-        ${new Date(d.a).toLocaleDateString([], { weekday: 'narrow' })}
-      </div>`).join('');
+    const max = Math.max(...days.map((d) => d.ms), 1), wk = $('week');
+    if (!days.some((d) => d.a === selDay)) selDay = null;
+    const key = days.map((d) => d.a).join();
+    if (key !== weekKey) {   // only rebuild the buttons when the days change, so keyboard focus survives the ticks
+      weekKey = key;
+      wk.innerHTML = days.map((d) => `
+        <button type="button" class="day${d.a === today ? ' now' : ''}" data-day="${d.a}">
+          <span class="col"><span class="stack"></span></span>${new Date(d.a).toLocaleDateString([], { weekday: 'narrow' })}
+        </button>`).join('');
+    }
+    days.forEach((d, i) => {
+      const b = wk.children[i], name = new Date(d.a).toLocaleDateString([], { weekday: 'long' }), stack = b.querySelector('.stack');
+      b.classList.toggle('sel', d.a === selDay);
+      b.setAttribute('aria-pressed', d.a === selDay);
+      b.title = `${name}: ${words(d.ms)}`;
+      b.setAttribute('aria-label', `${name}, ${words(d.ms)}`);
+      stack.style.height = `${(d.ms / max) * 100}%`;
+      stack.innerHTML = d.parts.map((p) => `<i class="seg" style="--h:${p.hue};flex:${p.ms}"></i>`).join('');
+    });
+    paintDay(now);
+  }
+
+  function paintDay(now) {   // breakdown of the day picked in the week chart
+    const el = $('dayview');
+    el.hidden = selDay == null;
+    if (selDay == null) { dayHtml = ''; return; }
+    const e = new Date(selDay); e.setDate(e.getDate() + 1);
+    const rows = state.timers.map((t) => ({ t, ms: span(t, selDay, e.getTime(), now) })).filter((r) => r.ms > 0).sort((a, b) => b.ms - a.ms);
+    const total = rows.reduce((n, r) => n + r.ms, 0), d = new Date(selDay), top = rows[0]?.ms || 1;
+    const html = rows.length
+      ? `<h2>${d.toLocaleDateString([], { weekday: 'long' })} ${d.getDate()} ${d.toLocaleDateString([], { month: 'short' })} · ${words(total)} total</h2><ul>${rows.map((r) => `
+          <li style="--h:${r.t.hue}"><i class="dot"></i><span class="n">${esc(r.t.name)}</span><span class="d">${words(r.ms)}</span><span class="bar"><i style="width:${(r.ms / top) * 100}%"></i></span></li>`).join('')}</ul>`
+      : `<h2>Nothing tracked on ${d.toLocaleDateString([], { weekday: 'long' })}</h2>`;
+    if (html !== dayHtml) el.innerHTML = dayHtml = html;
   }
 
   function paintIcon(live) {   // the tab icon and dock badge show at a glance whether anything is running
@@ -254,6 +282,30 @@
     if (live.length) { g.fillStyle = color; g.beginPath(); g.arc(32, 32, 7, 0, Math.PI * 2); g.fill(); }
     $('favicon').href = c.toDataURL();
     if (navigator.setAppBadge) (live.length ? navigator.setAppBadge(live.length) : navigator.clearAppBadge()).catch(() => {});
+  }
+
+  // ---------- CSV export ----------
+  const csvCell = (v) => {
+    v = String(v);
+    if (/^[=+\-@\t\r]/.test(v)) v = `'${v}`;   // stop spreadsheets treating a name as a formula
+    return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  };
+  function csvOf(timers, now) {   // one row per session, oldest first; null when there is nothing to export
+    const rows = timers.flatMap((t) => t.sessions.map(([s, e]) => [t.name, s, e ?? now]));
+    if (!rows.length) return null;
+    const day = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+    const time = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+    return ['timer,date,start,end,minutes', ...rows.sort((a, b) => a[1] - b[1]).map(([n, s, e]) =>
+      [n, day(s), time(s), time(e), ((e - s) / 60e3).toFixed(1)].map(csvCell).join(','))].join('\r\n') + '\r\n';
+  }
+  function exportCsv() {
+    const now = Date.now(), csv = csvOf(state.timers, now);
+    if (!csv) return note('Nothing to export yet');
+    const d = new Date(now), a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = `stopwatch-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.csv`;
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
   // ---------- list interactions (shared by the page and the floating window) ----------
@@ -303,6 +355,14 @@
     $('undo').hidden = false;
     $('toast').hidden = false;
   }
+  function note(text) {   // a toast without the undo button
+    clearTimeout(undo?.timer);
+    undo = null;
+    $('undo').hidden = true;
+    $('toastText').textContent = text;
+    $('toast').hidden = false;
+    setTimeout(() => { $('toast').hidden = true; $('undo').hidden = false; }, 5000);
+  }
   $('undo').addEventListener('click', () => {
     if (!undo) return;
     clearTimeout(undo.timer);
@@ -349,12 +409,7 @@
     try {
       w = await documentPictureInPicture.requestWindow({ width: 280, height: Math.min(60 + state.timers.length * 44, 360) });
     } catch {
-      clearTimeout(undo?.timer);
-      undo = null;
-      $('undo').hidden = true;
-      $('toastText').textContent = 'This browser blocked the floating window. Try Chrome or Edge.';
-      $('toast').hidden = false;
-      setTimeout(() => { $('toast').hidden = true; $('undo').hidden = false; }, 5000);
+      note('This browser blocked the floating window. Try Chrome or Edge.');
       return;
     }
     const css = w.document.createElement('link');
@@ -378,6 +433,14 @@
     $('q').blur();
   });
 
+  $('export').addEventListener('click', exportCsv);
+  $('week').addEventListener('click', (ev) => {
+    const b = ev.target.closest('.day');
+    if (!b) return;
+    selDay = selDay === Number(b.dataset.day) ? null : Number(b.dataset.day);
+    paint();
+  });
+
   $('solo').checked = state.solo;
   $('solo').addEventListener('change', (ev) => { state.solo = ev.target.checked; commit(); });
 
@@ -399,6 +462,7 @@
     else if (ev.key === '+' || ev.key === '=') nudge(byId(state.last) || state.timers[0], STEP);
     else if (ev.key === '-') nudge(byId(state.last) || state.timers[0], -STEP);
     else if (ev.key === 'p') popOut();
+    else if (ev.key === 'Escape' && selDay != null) { selDay = null; paint(); }
   });
 
   // another tab or the installed app changed something

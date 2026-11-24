@@ -23,6 +23,7 @@
           <label class="switch" title="Starting one timer pauses the others">
             <input type="checkbox" id="solo"> One at a time
           </label>
+          <button type="button" id="export" title="Download all sessions as CSV">Export</button>
           <button type="button" id="pop" hidden title="Floating mini window (P)">Pop out</button>
           <button type="button" id="install" hidden>Install</button>
         </span>
@@ -34,6 +35,8 @@
       <div id="timeline" class="timeline" aria-hidden="true"></div>
       <div class="ends"><span id="from"></span><span>now</span></div>
     </header>
+
+    <section id="dayview" class="dayview" aria-live="polite" hidden></section>
 
     <div id="away" class="away" hidden>
       <span id="awayText"></span>
